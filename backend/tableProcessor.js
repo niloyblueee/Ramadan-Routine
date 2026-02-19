@@ -2,7 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { PDFParse } = require('pdf-parse');
+const pdf = require('pdf-parse');
 require('dotenv').config({ path: require('path').join(__dirname, '.env') });
 const { OpenAI } = require('openai');
 const PDFDocument = require('pdfkit');
@@ -43,31 +43,35 @@ function adjustTime(timeStr) {
   return timeStr;
 }
 
-// ─── PDF PATH: Render to image → GPT-4o Vision ──────────────────────────────
-// The PDF is image-based (scanned), so we render each page to a PNG and
-// send to GPT-4o vision — no geometry/text extraction needed.
+// ─── SYSTEM PROMPTS ───────────────────────────────────────────────────────────
 
-async function extractAndAdjustFromPDF(filePath) {
-  const dataBuffer = fs.readFileSync(filePath);
-  const parser = new PDFParse({ data: dataBuffer });
-  const screenshot = await parser.getScreenshot({ scale: 2, imageDataUrl: true });
+const GPT_TEXT_SYSTEM_PROMPT = `You are a schedule-processing assistant for university Ramadan timetable adjustments.
 
-  if (!screenshot.pages || screenshot.pages.length === 0) {
-    throw new Error('Could not render PDF to image.');
-  }
+You will receive text extracted from a university class schedule PDF.
+The FIRST COLUMN contains time ranges like "HH:MM AM - HH:MM PM".
+All other columns contain days, subjects, or class names.
+Do NOT modify any column except the first column (time column).
 
-  // Use all pages (concatenate content arrays for GPT)
-  const imageContents = screenshot.pages
-    .filter(p => p.dataUrl)
-    .map(p => ({
-      type: 'image_url',
-      image_url: { url: p.dataUrl, detail: 'auto' }
-    }));
+Extract the full table and replace ONLY the first column using these EXACT rules:
 
-  return await extractAndAdjustWithVision(imageContents);
-}
+REGULAR CLASSES:
+08:00 AM - 09:20 AM  →  08:00 AM - 09:05 AM
+09:30 AM - 10:50 AM  →  09:15 AM - 10:20 AM
+11:00 AM - 12:20 PM  →  10:30 AM - 11:35 AM
+12:30 PM - 01:50 PM  →  11:45 AM - 12:50 PM
+02:00 PM - 03:20 PM  →  01:00 PM - 02:05 PM
+03:30 PM - 04:50 PM  →  02:15 PM - 03:20 PM
+05:00 PM - 06:20 PM  →  03:30 PM - 04:35 PM
 
-// ─── SHARED: GPT-4o Vision extraction + time adjustment ──────────────────────
+LAB CLASSES:
+08:00 AM - 10:50 AM  →  08:00 AM - 10:20 AM
+11:00 AM - 01:50 PM  →  10:30 AM - 12:50 PM
+02:00 PM - 04:50 PM  →  01:00 PM - 03:20 PM
+05:00 PM - 07:50 PM  →  03:30 PM - 05:50 PM
+
+If a time does not match exactly, leave it unchanged.
+Return ONLY a valid JSON array with exact column headers from the table, like:
+[{ "Time": "...", "Sunday": "...", "Monday": "..." }, ...]`;
 
 const GPT_SYSTEM_PROMPT = `You are a schedule-processing assistant for university Ramadan timetable adjustments.
 
@@ -97,9 +101,63 @@ If a time does not match exactly, leave it unchanged.
 Return ONLY a valid JSON array with exact column headers from the table, like:
 [{ "Time": "...", "Sunday": "...", "Monday": "..." }, ...]`;
 
-async function extractAndAdjustWithVision(imageContents) {
+// ─── PDF PATH: Extract text → GPT-4o ─────────────────────────────────────────
+// Use pdf-parse to extract the text content from the PDF, then send it to
+// GPT-4o as a text prompt for schedule extraction and time adjustment.
+
+async function extractAndAdjustFromPDF(filePath) {
+  const dataBuffer = fs.readFileSync(filePath);
+  const pdfData = await pdf(dataBuffer);
+  const extractedText = pdfData.text;
+
+  if (!extractedText || extractedText.trim() === '') {
+    throw new Error('Could not extract text from PDF.');
+  }
+
+  console.log('[OpenAI Input - PDF extracted text]:\n', extractedText.slice(0, 1000), extractedText.length > 1000 ? '...(truncated)' : '');
+
   const completion = await openai.chat.completions.create({
-    model: 'gpt-5',
+    model: 'gpt-4o',
+    messages: [
+      { role: 'system', content: GPT_TEXT_SYSTEM_PROMPT },
+      {
+        role: 'user',
+        content: `Here is the schedule table extracted from the PDF:\n\n${extractedText}\n\nExtract the schedule table and apply the Ramadan time adjustments. Return ONLY the JSON array.`
+      }
+    ],
+    max_completion_tokens: 8192
+  });
+
+  const raw = completion.choices[0]?.message?.content;
+  console.log('[OpenAI Output - PDF]:\n', raw);
+
+  if (!raw || raw.trim() === '') {
+    throw new Error(`GPT returned empty content. Finish reason: ${completion.choices[0]?.finish_reason}`);
+  }
+
+  let content = raw.trim();
+  content = content.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '').trim();
+
+  const start = content.indexOf('[');
+  const end = content.lastIndexOf(']');
+  if (start === -1 || end === -1 || end < start) {
+    throw new Error(`Could not locate JSON array in response. Raw content: ${content.slice(0, 300)}`);
+  }
+  content = content.slice(start, end + 1);
+
+  try {
+    return JSON.parse(content);
+  } catch (e) {
+    throw new Error(`JSON parse failed: ${e.message}. Raw snippet: ${content.slice(0, 300)}`);
+  }
+}
+
+// ─── SHARED: GPT-4o Vision extraction + time adjustment ──────────────────────
+
+async function extractAndAdjustWithVision(imageContents) {
+  console.log('[OpenAI Input - Vision]:', `${imageContents.length} image(s) sent to gpt-4o`);
+  const completion = await openai.chat.completions.create({
+    model: 'gpt-4o',
     messages: [
       { role: 'system', content: GPT_SYSTEM_PROMPT },
       {
@@ -114,6 +172,7 @@ async function extractAndAdjustWithVision(imageContents) {
   });
 
   const raw = completion.choices[0]?.message?.content;
+  console.log('[OpenAI Output - Vision]:\n', raw);
   if (!raw || raw.trim() === '') {
     throw new Error(`GPT returned empty content. Finish reason: ${completion.choices[0]?.finish_reason}`);
   }
