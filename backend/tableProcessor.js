@@ -2,7 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { PDFParse } = require('pdf-parse');
+const { fromPath } = require('pdf2pic');
 require('dotenv').config({ path: require('path').join(__dirname, '.env') });
 const { OpenAI } = require('openai');
 const PDFDocument = require('pdfkit');
@@ -43,25 +43,39 @@ function adjustTime(timeStr) {
   return timeStr;
 }
 
-// ─── PDF PATH: Render to image → GPT-4o Vision ──────────────────────────────
-// The PDF is image-based (scanned), so we render each page to a PNG and
-// send to GPT-4o vision — no geometry/text extraction needed.
+// ─── PDF PATH: Render each page to PNG → GPT Vision ─────────────────────────
+// The PDF is image-based (scanned), so we render each page to a PNG using
+// GhostScript (via pdf2pic) and send the images to GPT vision.
 
 async function extractAndAdjustFromPDF(filePath) {
-  const dataBuffer = fs.readFileSync(filePath);
-  const parser = new PDFParse({ data: dataBuffer });
-  const screenshot = await parser.getScreenshot({ scale: 2, imageDataUrl: true });
+  const pagesDir = filePath + '_pages';
+  fs.mkdirSync(pagesDir, { recursive: true });
 
-  if (!screenshot.pages || screenshot.pages.length === 0) {
+  const convert = fromPath(filePath, {
+    density: 150,
+    saveFilename: 'page',
+    savePath: pagesDir,
+    format: 'png',
+    width: 1600,
+    height: 1200,
+  });
+  convert.setGMClass(true); // use ImageMagick (GhostScript backend)
+
+  // Convert all pages; responseType 'base64' returns inline data
+  const results = await convert.bulk(-1, { responseType: 'base64' });
+
+  // Clean up temporary page files
+  try { fs.rmSync(pagesDir, { recursive: true, force: true }); } catch (cleanupErr) { console.warn('PDF page cleanup failed:', cleanupErr.message); }
+
+  if (!results || results.length === 0) {
     throw new Error('Could not render PDF to image.');
   }
 
-  // Use all pages (concatenate content arrays for GPT)
-  const imageContents = screenshot.pages
-    .filter(p => p.dataUrl)
-    .map(p => ({
+  const imageContents = results
+    .filter(r => r.base64)
+    .map(r => ({
       type: 'image_url',
-      image_url: { url: p.dataUrl, detail: 'auto' }
+      image_url: { url: `data:image/png;base64,${r.base64}`, detail: 'auto' },
     }));
 
   return await extractAndAdjustWithVision(imageContents);
@@ -99,7 +113,7 @@ Return ONLY a valid JSON array with exact column headers from the table, like:
 
 async function extractAndAdjustWithVision(imageContents) {
   const completion = await openai.chat.completions.create({
-    model: 'gpt-5',
+    model: 'gpt-4o',
     messages: [
       { role: 'system', content: GPT_SYSTEM_PROMPT },
       {

@@ -88,6 +88,12 @@ body {
   margin: 0 0.5em;
   font-family: 'Permanent Marker', 'Comic Sans MS', cursive;
 }
+.routine-status {
+  color: #90caf9;
+  margin-bottom: 1em;
+  font-size: 0.97em;
+  text-align: center;
+}
 .routine-error {
   color: #ff6b6b;
   margin-bottom: 1em;
@@ -117,5 +123,4 @@ body {
     padding: 0.6em 1em;
   }
 }
-  color: #888;
-}
+

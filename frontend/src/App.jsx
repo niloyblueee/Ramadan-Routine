@@ -5,8 +5,8 @@ import './App.css';
 function App() {
   const [file, setFile] = useState(null);
   const [uploading, setUploading] = useState(false);
+  const [status, setStatus] = useState(null);
   const [downloadUrl, setDownloadUrl] = useState(null);
-  //const [downloadName, setDownloadName] = useState('RamadanSchedule.pdf');
   const [error, setError] = useState(null);
   const fileInput = useRef();
 
@@ -14,6 +14,7 @@ function App() {
     setFile(e.target.files[0]);
     setDownloadUrl(null);
     setError(null);
+    setStatus(null);
   };
 
   const handleUpload = async () => {
@@ -21,21 +22,34 @@ function App() {
     setUploading(true);
     setError(null);
     setDownloadUrl(null);
+
+    const isPDF = file.name.toLowerCase().endsWith('.pdf');
+    setStatus(isPDF
+      ? '📄 Converting PDF pages to images…'
+      : '🖼️ Reading image…');
+
     const formData = new FormData();
     formData.append('file', file);
     try {
+      setStatus('🤖 GPT-4o is analysing the schedule image…');
+
       const res = await fetch('http://localhost:5000/api/upload', {
         method: 'POST',
         body: formData,
       });
+
+      setStatus('📝 Generating adjusted Ramadan schedule PDF…');
       const data = await res.json();
+
       if (res.ok && data.download) {
+        setStatus('✅ Done! Your adjusted schedule is ready.');
         setDownloadUrl('http://localhost:5000' + data.download);
-        //setDownloadName(data.filename || 'RamadanSchedule.pdf');
       } else {
+        setStatus(null);
         setError(data.error || 'Upload failed');
       }
     } catch (err) {
+      setStatus(null);
       setError('Network error');
     }
     setUploading(false);
@@ -61,7 +75,7 @@ function App() {
       </div>
       <div className="routine-actions">
         <button className="routine-btn" onClick={handleUpload} disabled={!file || uploading}>
-          {uploading ? 'Uploading...' : 'UpLoad File'}
+          {uploading ? 'Processing…' : 'UpLoad File'}
         </button>
         <div className="routine-divider">/</div>
         <a
@@ -74,6 +88,7 @@ function App() {
           Download Routine
         </a>
       </div>
+      {status && <div className="routine-status">{status}</div>}
       {error && <div className="routine-error">{error}</div>}
       <footer className="routine-footer">Made with {'<3'} by NiloyBlueee</footer>
     </div>
