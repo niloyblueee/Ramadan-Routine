@@ -1,0 +1,121 @@
+body {
+  background: #18191a;
+  color: #f1f1f1;
+  font-family: 'Comic Sans MS', 'Comic Sans', cursive, sans-serif;
+  margin: 0;
+  min-height: 100vh;
+}
+
+#root {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+
+.routine-container {
+  background: #232526;
+  border: 2px solid #f1f1f1;
+  border-radius: 20px;
+  padding: 2rem 1rem 1rem 1rem;
+  max-width: 400px;
+  margin: 2rem auto;
+  box-shadow: 0 0 16px #000a;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.routine-title {
+  font-size: 2rem;
+  font-family: 'Permanent Marker', 'Comic Sans MS', cursive;
+  margin-bottom: 0.2em;
+}
+.routine-subtitle {
+  font-size: 1.1rem;
+  margin-bottom: 1.5em;
+  color: #bdbdbd;
+}
+.routine-dropzone {
+  border: 2px dashed #f1f1f1;
+  border-radius: 16px;
+  padding: 2em 1em;
+  margin-bottom: 1.5em;
+  width: 100%;
+  min-height: 60px;
+  text-align: center;
+  cursor: pointer;
+  background: #18191a;
+  color: #f1f1f1;
+  font-size: 1.1em;
+  transition: background 0.2s;
+}
+.routine-dropzone:hover {
+  background: #222325;
+}
+.routine-actions {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 1.5em;
+  gap: 1em;
+}
+.routine-btn {
+  background: #232526;
+  color: #f1f1f1;
+  border: 2px solid #f1f1f1;
+  border-radius: 12px;
+  padding: 0.7em 1.5em;
+  font-size: 1em;
+  cursor: pointer;
+  transition: background 0.2s, color 0.2s;
+  text-decoration: none;
+  outline: none;
+}
+.routine-btn:disabled,
+.routine-btn.disabled {
+  opacity: 0.5;
+  pointer-events: none;
+}
+.routine-btn:not(:disabled):hover {
+  background: #f1f1f1;
+  color: #232526;
+}
+.routine-divider {
+  font-size: 2em;
+  color: #f1f1f1;
+  margin: 0 0.5em;
+  font-family: 'Permanent Marker', 'Comic Sans MS', cursive;
+}
+.routine-error {
+  color: #ff6b6b;
+  margin-bottom: 1em;
+  font-size: 1em;
+}
+.routine-footer {
+  margin-top: 2em;
+  color: #bdbdbd;
+  font-size: 1em;
+  text-align: center;
+}
+
+@media (max-width: 600px) {
+  .routine-container {
+    max-width: 98vw;
+    padding: 1rem 0.2rem 0.5rem 0.2rem;
+  }
+  .routine-title {
+    font-size: 1.3rem;
+  }
+  .routine-dropzone {
+    font-size: 1em;
+    padding: 1.2em 0.5em;
+  }
+  .routine-btn {
+    font-size: 0.95em;
+    padding: 0.6em 1em;
+  }
+}
+  color: #888;
+}
