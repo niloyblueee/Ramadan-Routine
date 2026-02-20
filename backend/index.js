@@ -5,7 +5,11 @@ const multer = require('multer');
 const cors = require('cors');
 const path = require('path');
 const fs = require('fs');
-const { extractAndAdjustFromPDF, extractAndAdjustFromImage, generateSchedulePDF } = require('./tableProcessor');
+const {
+  extractScheduleDataFromPDF,
+  extractScheduleDataFromImage,
+  generateSchedulePDFFromData
+} = require('./tableProcessor');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -25,25 +29,37 @@ app.get('/', (req, res) => {
 app.post('/api/upload', upload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
   const ext = path.extname(req.file.originalname).toLowerCase();
+  const startedAt = Date.now();
+
   try {
     let scheduleData;
     if (ext === '.pdf') {
-      scheduleData = await extractAndAdjustFromPDF(req.file.path);
+      scheduleData = await extractScheduleDataFromPDF(req.file.path);
     } else if (['.jpg', '.jpeg', '.png', '.bmp', '.webp'].includes(ext)) {
-      scheduleData = await extractAndAdjustFromImage(req.file.path);
+      scheduleData = await extractScheduleDataFromImage(req.file.path);
     } else {
       return res.status(400).json({ error: 'Unsupported file type' });
     }
 
-    // Generate PDF from the adjusted schedule
+    const baseName = path.parse(req.file.originalname).name || 'Routine';
+    const title = `${baseName} - Ramadan Routine`;
+
     const pdfFilename = req.file.filename + '_ramadan.pdf';
     const pdfPath = path.join(__dirname, 'uploads', pdfFilename);
-    await generateSchedulePDF(scheduleData, pdfPath);
+    await generateSchedulePDFFromData(scheduleData, title, pdfPath);
 
-    res.json({ download: `/api/download/${pdfFilename}` });
+    res.json({
+      download: `/api/download/${pdfFilename}`,
+      scheduleData,
+      processingMs: Date.now() - startedAt
+    });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Failed to process file', details: err.message });
+  } finally {
+    if (req.file?.path && fs.existsSync(req.file.path)) {
+      fs.unlink(req.file.path, () => {});
+    }
   }
 });
 

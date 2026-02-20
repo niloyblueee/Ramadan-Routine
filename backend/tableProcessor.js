@@ -1,15 +1,26 @@
-// Utility for extracting and adjusting Ramadan routine tables
-
 const fs = require('fs');
 const path = require('path');
 const { PDFParse } = require('pdf-parse');
-require('dotenv').config({ path: require('path').join(__dirname, '.env') });
+require('dotenv').config({ path: path.join(__dirname, '.env') });
 const { OpenAI } = require('openai');
 const PDFDocument = require('pdfkit');
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// ─── TIME MAPS ───────────────────────────────────────────────────────────────
+const GPT_SYSTEM_PROMPT = `You are a schedule-processing assistant for university Ramadan timetable adjustments.
+
+You will receive one or more images of a university class schedule table.
+The FIRST COLUMN contains time ranges like "HH:MM AM - HH:MM PM".
+All other columns contain days, subjects, sections, teachers, room numbers, and notes.
+Do NOT modify semantic meaning of any non-time column.
+
+Preserve complete cell content exactly as visible for non-time columns, including room numbers (e.g., UB40504), section labels, and bracketed notes.
+Extract the full table exactly as seen. Do not summarize and do not omit words.
+
+Return ONLY a valid JSON array with original headers as object keys, like:
+[{"Time":"08:00 AM - 09:20 AM","Sunday":"CSE110 [Room UB40504]","Monday":"..."}]
+
+No markdown. No explanation. No code fences.`;
 
 const CLASS_TIME_MAP = {
   '08:00 AM - 09:20 AM': '08:00 AM - 09:05 AM',
@@ -18,207 +29,330 @@ const CLASS_TIME_MAP = {
   '12:30 PM - 01:50 PM': '11:45 AM - 12:50 PM',
   '02:00 PM - 03:20 PM': '01:00 PM - 02:05 PM',
   '03:30 PM - 04:50 PM': '02:15 PM - 03:20 PM',
-  '05:00 PM - 06:20 PM': '03:30 PM - 04:35 PM',
+  '05:00 PM - 06:20 PM': '03:30 PM - 04:35 PM'
 };
 
 const LAB_TIME_MAP = {
   '08:00 AM - 10:50 AM': '08:00 AM - 10:20 AM',
   '11:00 AM - 01:50 PM': '10:30 AM - 12:50 PM',
   '02:00 PM - 04:50 PM': '01:00 PM - 03:20 PM',
-  '05:00 PM - 07:50 PM': '03:30 PM - 05:50 PM',
+  '05:00 PM - 07:50 PM': '03:30 PM - 05:50 PM'
 };
 
 function normalizeTime(str) {
-  return str.replace(/\s+/g, ' ').trim().toUpperCase().replace(/(\d)(AM|PM)/g, '$1 $2');
+  return String(str || '')
+    .replace(/[.]/g, ':')
+    .replace(/\s+/g, ' ')
+    .replace(/\s*:\s*/g, ':')
+    .replace(/\s*[-–—−]\s*/g, ' - ')
+    .trim()
+    .toUpperCase()
+    .replace(/[–—−]/g, '-')
+    .replace(/\b0(\d):/g, '$1:')
+    .replace(/(\d)(AM|PM)/g, '$1 $2');
 }
 
-function adjustTime(timeStr) {
-  const norm = normalizeTime(timeStr);
-  for (const [k, v] of Object.entries(CLASS_TIME_MAP)) {
-    if (normalizeTime(k) === norm) return v;
-  }
-  for (const [k, v] of Object.entries(LAB_TIME_MAP)) {
-    if (normalizeTime(k) === norm) return v;
-  }
-  return timeStr;
+const NORMALIZED_TIME_MAP = (() => {
+  const mapping = {};
+  Object.entries(CLASS_TIME_MAP).forEach(([source, target]) => {
+    mapping[normalizeTime(source)] = target;
+  });
+  Object.entries(LAB_TIME_MAP).forEach(([source, target]) => {
+    mapping[normalizeTime(source)] = target;
+  });
+  return mapping;
+})();
+
+function adjustTimeValue(value) {
+  const text = String(value || '');
+  const fullMatch = NORMALIZED_TIME_MAP[normalizeTime(text)];
+  if (fullMatch) return fullMatch;
+
+  const rangeRegex = /(\d{1,2}[:.]\d{2}\s*(?:AM|PM)\s*[-–—−]\s*\d{1,2}[:.]\d{2}\s*(?:AM|PM))/gi;
+  let changed = false;
+
+  const updated = text.replace(rangeRegex, (matchedRange) => {
+    const replacement = NORMALIZED_TIME_MAP[normalizeTime(matchedRange)];
+    if (replacement) {
+      changed = true;
+      return replacement;
+    }
+    return matchedRange;
+  });
+
+  return changed ? updated : text;
 }
 
-// ─── PDF PATH: Render to image → GPT-4o Vision ──────────────────────────────
-// The PDF is image-based (scanned), so we render each page to a PNG and
-// send to GPT-4o vision — no geometry/text extraction needed.
+function looksLikeTimeRange(value) {
+  return /\b\d{1,2}[:.]\d{2}\s*(AM|PM)\s*[-–—−]\s*\d{1,2}[:.]\d{2}\s*(AM|PM)\b/i.test(String(value || ''));
+}
 
-async function extractAndAdjustFromPDF(filePath) {
+function cleanModelText(raw) {
+  if (!raw || raw.trim() === '') {
+    throw new Error('GPT returned empty content.');
+  }
+
+  let content = raw.trim();
+  content = content.replace(/^```[a-zA-Z]*\s*/i, '').replace(/```\s*$/i, '').trim();
+  return content;
+}
+
+function parseScheduleJson(rawText) {
+  const content = cleanModelText(rawText);
+  const start = content.indexOf('[');
+  const end = content.lastIndexOf(']');
+
+  if (start === -1 || end === -1 || end < start) {
+    throw new Error('Could not locate JSON array in model output.');
+  }
+
+  const jsonText = content.slice(start, end + 1);
+  const parsed = JSON.parse(jsonText);
+  const rows = Array.isArray(parsed) ? parsed : (Array.isArray(parsed?.rows) ? parsed.rows : null);
+  if (!Array.isArray(rows)) {
+    throw new Error('Model output is not a JSON array.');
+  }
+
+  return rows;
+}
+
+function normalizeScheduleData(scheduleData) {
+  if (!Array.isArray(scheduleData) || scheduleData.length === 0) {
+    return { headers: ['Schedule'], rows: [['No schedule data found']] };
+  }
+
+  const allHeaders = [];
+  scheduleData.forEach((row) => {
+    Object.keys(row || {}).forEach((key) => {
+      if (!allHeaders.includes(key)) allHeaders.push(key);
+    });
+  });
+
+  const headers = allHeaders.length ? allHeaders : ['Schedule'];
+  const rows = scheduleData.map((row) =>
+    headers.map((header) => {
+      const value = row?.[header];
+      return value == null ? '' : String(value);
+    })
+  );
+
+  return { headers, rows };
+}
+
+function applyRamadanAdjustments(scheduleData) {
+  if (!Array.isArray(scheduleData) || scheduleData.length === 0) {
+    return scheduleData;
+  }
+
+  const headers = [];
+  scheduleData.forEach((row) => {
+    Object.keys(row || {}).forEach((key) => {
+      if (!headers.includes(key)) headers.push(key);
+    });
+  });
+
+  const headerScores = headers.map((header, index) => {
+    const matches = scheduleData.filter((row) => looksLikeTimeRange(row?.[header])).length;
+    return { header, index, matches };
+  });
+
+  let targetHeader = headers.find((header) => /time|slot|period/i.test(header));
+  if (!targetHeader) {
+    headerScores.sort((a, b) => b.matches - a.matches || a.index - b.index);
+    targetHeader = headerScores[0]?.header || headers[0];
+  }
+
+  return scheduleData.map((row) => {
+    const updated = { ...row };
+    const originalTargetValue = updated[targetHeader];
+    const adjustedTargetValue = adjustTimeValue(originalTargetValue);
+    updated[targetHeader] = adjustedTargetValue;
+
+    if (adjustedTargetValue === String(originalTargetValue || '')) {
+      headers.forEach((header) => {
+        updated[header] = adjustTimeValue(updated[header]);
+      });
+    }
+
+    return updated;
+  });
+}
+
+async function extractScheduleDataWithVision(imageContents) {
+  const primaryModel = process.env.OPENAI_VISION_MODEL || 'gpt-4o';
+  const fallbackModel = process.env.OPENAI_VISION_FALLBACK_MODEL || 'gpt-4o-mini';
+  const imageDetail = process.env.OPENAI_IMAGE_DETAIL || 'auto';
+
+  const runExtraction = async (modelName) => {
+    const completion = await openai.chat.completions.create({
+      model: modelName,
+      messages: [
+        { role: 'system', content: GPT_SYSTEM_PROMPT },
+        {
+          role: 'user',
+          content: [
+            ...imageContents.map((item) => ({
+              ...item,
+              image_url: { ...item.image_url, detail: imageDetail }
+            })),
+            {
+              type: 'text',
+              text: 'Extract schedule and return only JSON array with full original cell text.'
+            }
+          ]
+        }
+      ],
+      max_completion_tokens: 5000
+    });
+
+    const raw = completion.choices[0]?.message?.content;
+    return parseScheduleJson(raw);
+  };
+
+  try {
+    return await runExtraction(primaryModel);
+  } catch (error) {
+    if (!fallbackModel || fallbackModel === primaryModel) throw error;
+    return await runExtraction(fallbackModel);
+  }
+}
+
+async function extractScheduleDataFromPDF(filePath) {
+  const renderScale = Number(process.env.PDF_RENDER_SCALE || 1.4);
+  const maxPages = Math.max(1, Number(process.env.PDF_MAX_PAGES || 1));
   const dataBuffer = fs.readFileSync(filePath);
   const parser = new PDFParse({ data: dataBuffer });
-  const screenshot = await parser.getScreenshot({ scale: 2, imageDataUrl: true });
+  const screenshot = await parser.getScreenshot({ scale: renderScale, imageDataUrl: true });
 
   if (!screenshot.pages || screenshot.pages.length === 0) {
     throw new Error('Could not render PDF to image.');
   }
 
-  // Use all pages (concatenate content arrays for GPT)
   const imageContents = screenshot.pages
-    .filter(p => p.dataUrl)
-    .map(p => ({
+    .slice(0, maxPages)
+    .filter((page) => page.dataUrl)
+    .map((page) => ({
       type: 'image_url',
-      image_url: { url: p.dataUrl, detail: 'auto' }
+      image_url: { url: page.dataUrl, detail: 'auto' }
     }));
 
-  return await extractAndAdjustWithVision(imageContents);
+  const extracted = await extractScheduleDataWithVision(imageContents);
+  return applyRamadanAdjustments(extracted);
 }
 
-// ─── SHARED: GPT-4o Vision extraction + time adjustment ──────────────────────
-
-const GPT_SYSTEM_PROMPT = `You are a schedule-processing assistant for university Ramadan timetable adjustments.
-
-You will receive an image of a university class schedule table.
-The FIRST COLUMN contains time ranges like "HH:MM AM - HH:MM PM".
-All other columns contain days, subjects, or class names.
-Do NOT modify any column except the first column (time column).
-
-Extract the full table and replace ONLY the first column using these EXACT rules:
-
-REGULAR CLASSES:
-08:00 AM - 09:20 AM  →  08:00 AM - 09:05 AM
-09:30 AM - 10:50 AM  →  09:15 AM - 10:20 AM
-11:00 AM - 12:20 PM  →  10:30 AM - 11:35 AM
-12:30 PM - 01:50 PM  →  11:45 AM - 12:50 PM
-02:00 PM - 03:20 PM  →  01:00 PM - 02:05 PM
-03:30 PM - 04:50 PM  →  02:15 PM - 03:20 PM
-05:00 PM - 06:20 PM  →  03:30 PM - 04:35 PM
-
-LAB CLASSES:
-08:00 AM - 10:50 AM  →  08:00 AM - 10:20 AM
-11:00 AM - 01:50 PM  →  10:30 AM - 12:50 PM
-02:00 PM - 04:50 PM  →  01:00 PM - 03:20 PM
-05:00 PM - 07:50 PM  →  03:30 PM - 05:50 PM
-
-If a time does not match exactly, leave it unchanged.
-Return ONLY a valid JSON array with exact column headers from the table, like:
-[{ "Time": "...", "Sunday": "...", "Monday": "..." }, ...]`;
-
-async function extractAndAdjustWithVision(imageContents) {
-  const completion = await openai.chat.completions.create({
-    model: 'gpt-5',
-    messages: [
-      { role: 'system', content: GPT_SYSTEM_PROMPT },
-      {
-        role: 'user',
-        content: [
-          ...imageContents,
-          { type: 'text', text: 'Extract the schedule table and apply the Ramadan time adjustments. Return ONLY the JSON array.' }
-        ]
-      }
-    ],
-    max_completion_tokens: 8192
-  });
-
-  const raw = completion.choices[0]?.message?.content;
-  if (!raw || raw.trim() === '') {
-    throw new Error(`GPT returned empty content. Finish reason: ${completion.choices[0]?.finish_reason}`);
-  }
-
-  let content = raw.trim();
-  content = content.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '').trim();
-
-  // Find the JSON array bounds in case extra text is present
-  const start = content.indexOf('[');
-  const end = content.lastIndexOf(']');
-  if (start === -1 || end === -1 || end < start) {
-    throw new Error(`Could not locate JSON array in response. Raw content: ${content.slice(0, 300)}`);
-  }
-  content = content.slice(start, end + 1);
-
-  try {
-    return JSON.parse(content);
-  } catch (e) {
-    throw new Error(`JSON parse failed: ${e.message}. Raw snippet: ${content.slice(0, 300)}`);
-  }
-}
-
-// ─── IMAGE PATH: Tesseract OCR not needed — send directly to GPT-4o Vision ───
-
-async function extractAndAdjustFromImage(filePath) {
+async function extractScheduleDataFromImage(filePath) {
   const imageBuffer = fs.readFileSync(filePath);
   const base64 = imageBuffer.toString('base64');
   const ext = path.extname(filePath).toLowerCase().replace('.', '');
   const mimeType = ext === 'jpg' || ext === 'jpeg' ? 'image/jpeg' : `image/${ext}`;
 
-  return await extractAndAdjustWithVision([{
-    type: 'image_url',
-    image_url: { url: `data:${mimeType};base64,${base64}`, detail: 'auto' }
-  }]);
+  const extracted = await extractScheduleDataWithVision([
+    {
+      type: 'image_url',
+      image_url: { url: `data:${mimeType};base64,${base64}`, detail: 'auto' }
+    }
+  ]);
+
+  return applyRamadanAdjustments(extracted);
 }
 
-// ─── PDF GENERATION ──────────────────────────────────────────────────────────
+async function generateSchedulePDFFromData(scheduleData, title, outputPath) {
+  const { headers, rows } = normalizeScheduleData(scheduleData);
 
-function generateSchedulePDF(scheduleData, outputPath) {
-  return new Promise((resolve, reject) => {
+  await new Promise((resolve, reject) => {
     const doc = new PDFDocument({ margin: 30, size: 'A4', layout: 'landscape' });
-    const stream = fs.createWriteStream(outputPath);
-    doc.pipe(stream);
+    const writer = fs.createWriteStream(outputPath);
+    doc.pipe(writer);
 
-    doc.fontSize(14).font('Helvetica-Bold').text('Ramadan Class Schedule', { align: 'center' });
+    doc.fontSize(14).font('Helvetica-Bold').text(title || 'Ramadan Class Schedule', { align: 'center' });
     doc.moveDown(0.5);
 
-    if (!scheduleData || scheduleData.length === 0) {
-      doc.fontSize(11).font('Helvetica').text('No schedule data found.');
-      doc.end();
-      stream.on('finish', resolve);
-      stream.on('error', reject);
-      return;
-    }
+    const safeHeaders = headers.length ? headers : ['Schedule'];
+    const safeRows = rows.length ? rows : [['No schedule data found']];
 
-    const headers = Object.keys(scheduleData[0]);
     const pageWidth = doc.page.width - 60;
     const timeColWidth = Math.min(155, pageWidth * 0.24);
-    const otherColWidth = (pageWidth - timeColWidth) / Math.max(headers.length - 1, 1);
-    const colWidths = headers.map((_, i) => (i === 0 ? timeColWidth : otherColWidth));
-    const ROW_H = 22;
-    const FONT_SIZE = 7.5;
+    const otherColWidth = (pageWidth - timeColWidth) / Math.max(safeHeaders.length - 1, 1);
+    const colWidths = safeHeaders.map((_, idx) => (idx === 0 ? timeColWidth : otherColWidth));
+    const HEADER_H = 24;
+    const MIN_ROW_H = 28;
+    const FONT_SIZE = 8;
+    const CELL_TOP_PAD = 5;
+    const CELL_SIDE_PAD = 4;
 
-    function drawRow(rowData, y, isHeader) {
+    const getRowHeight = (rowData, isHeader) => {
+      if (isHeader) return HEADER_H;
+
+      doc.font('Helvetica').fontSize(FONT_SIZE);
+      let maxHeight = MIN_ROW_H;
+      safeHeaders.forEach((_, idx) => {
+        const width = colWidths[idx] - CELL_SIDE_PAD * 2;
+        const cellText = rowData[idx] || '';
+        const textHeight = doc.heightOfString(cellText, {
+          width,
+          align: 'left'
+        });
+        maxHeight = Math.max(maxHeight, textHeight + CELL_TOP_PAD * 2);
+      });
+      return maxHeight;
+    };
+
+    const drawRow = (rowData, y, isHeader, rowIndex = 0) => {
+      const rowHeight = getRowHeight(rowData, isHeader);
       doc.font(isHeader ? 'Helvetica-Bold' : 'Helvetica').fontSize(FONT_SIZE);
       let x = 30;
-      headers.forEach((header, i) => {
-        const w = colWidths[i];
+
+      safeHeaders.forEach((header, idx) => {
+        const width = colWidths[idx];
         if (isHeader) {
-          doc.rect(x, y, w, ROW_H).fill('#2c3e50').stroke('#2c3e50');
+          doc.rect(x, y, width, rowHeight).fill('#2c3e50').stroke('#2c3e50');
           doc.fillColor('#ffffff');
         } else {
-          const rowIdx = scheduleData.indexOf(rowData);
-          doc.rect(x, y, w, ROW_H).fill(rowIdx % 2 === 0 ? '#f0f4f8' : '#ffffff').stroke('#cccccc');
+          doc.rect(x, y, width, rowHeight).fill(rowIndex % 2 === 0 ? '#f0f4f8' : '#ffffff').stroke('#cccccc');
           doc.fillColor('#000000');
         }
-        const cellText = isHeader ? header : (rowData[header] || '');
-        doc.text(cellText, x + 3, y + 7, { width: w - 6, height: ROW_H - 8, ellipsis: true, lineBreak: false });
-        x += w;
+
+        const cellText = isHeader ? header : (rowData[idx] || '');
+        doc.text(cellText, x + CELL_SIDE_PAD, y + CELL_TOP_PAD, {
+          width: width - CELL_SIDE_PAD * 2,
+          height: rowHeight - CELL_TOP_PAD * 2,
+          ellipsis: false,
+          lineBreak: true,
+          align: 'left'
+        });
+
+        x += width;
       });
-    }
+
+      return rowHeight;
+    };
 
     let y = doc.y;
-    drawRow(null, y, true);
-    y += ROW_H;
+    const headerHeight = drawRow([], y, true);
+    y += headerHeight;
 
-    for (const row of scheduleData) {
-      if (y + ROW_H > doc.page.height - 40) {
+    safeRows.forEach((row, rowIndex) => {
+      const rowHeight = getRowHeight(row, false);
+      if (y + rowHeight > doc.page.height - 40) {
         doc.addPage();
         y = 30;
-        drawRow(null, y, true);
-        y += ROW_H;
+        const repeatedHeaderHeight = drawRow([], y, true);
+        y += repeatedHeaderHeight;
       }
-      drawRow(row, y, false);
-      y += ROW_H;
-    }
+      const usedHeight = drawRow(row, y, false, rowIndex);
+      y += usedHeight;
+    });
 
     doc.end();
-    stream.on('finish', resolve);
-    stream.on('error', reject);
+    writer.on('finish', resolve);
+    writer.on('error', reject);
   });
+
+  return outputPath;
 }
 
 module.exports = {
-  extractAndAdjustFromPDF,
-  extractAndAdjustFromImage,
-  generateSchedulePDF
+  extractScheduleDataFromPDF,
+  extractScheduleDataFromImage,
+  generateSchedulePDFFromData
 };
