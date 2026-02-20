@@ -183,6 +183,18 @@ async function extractScheduleDataWithVision(imageContents) {
   const fallbackModel = process.env.OPENAI_VISION_FALLBACK_MODEL || 'gpt-4o-mini';
   const imageDetail = process.env.OPENAI_IMAGE_DETAIL || 'auto';
 
+  return extractScheduleDataWithVisionOptions(imageContents, {
+    primaryModel,
+    fallbackModel,
+    imageDetail
+  });
+}
+
+async function extractScheduleDataWithVisionOptions(imageContents, options = {}) {
+  const primaryModel = options.primaryModel || process.env.OPENAI_VISION_MODEL || 'gpt-4o';
+  const fallbackModel = options.fallbackModel || process.env.OPENAI_VISION_FALLBACK_MODEL || 'gpt-4o-mini';
+  const imageDetail = options.imageDetail || process.env.OPENAI_IMAGE_DETAIL || 'auto';
+
   const runExtraction = async (modelName) => {
     const completion = await openai.chat.completions.create({
       model: modelName,
@@ -217,6 +229,7 @@ async function extractScheduleDataWithVision(imageContents) {
   }
 }
 
+
 async function extractScheduleDataFromPDF(filePath) {
   const renderScale = Number(process.env.PDF_RENDER_SCALE || 1.4);
   const maxPages = Math.max(1, Number(process.env.PDF_MAX_PAGES || 1));
@@ -240,21 +253,6 @@ async function extractScheduleDataFromPDF(filePath) {
   return applyRamadanAdjustments(extracted);
 }
 
-async function extractScheduleDataFromImage(filePath) {
-  const imageBuffer = fs.readFileSync(filePath);
-  const base64 = imageBuffer.toString('base64');
-  const ext = path.extname(filePath).toLowerCase().replace('.', '');
-  const mimeType = ext === 'jpg' || ext === 'jpeg' ? 'image/jpeg' : `image/${ext}`;
-
-  const extracted = await extractScheduleDataWithVision([
-    {
-      type: 'image_url',
-      image_url: { url: `data:${mimeType};base64,${base64}`, detail: 'auto' }
-    }
-  ]);
-
-  return applyRamadanAdjustments(extracted);
-}
 
 async function generateSchedulePDFFromData(scheduleData, title, outputPath) {
   const { headers, rows } = normalizeScheduleData(scheduleData);
@@ -353,6 +351,5 @@ async function generateSchedulePDFFromData(scheduleData, title, outputPath) {
 
 module.exports = {
   extractScheduleDataFromPDF,
-  extractScheduleDataFromImage,
   generateSchedulePDFFromData
 };

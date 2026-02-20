@@ -7,7 +7,6 @@ const path = require('path');
 const fs = require('fs');
 const {
   extractScheduleDataFromPDF,
-  extractScheduleDataFromImage,
   generateSchedulePDFFromData
 } = require('./tableProcessor');
 
@@ -32,14 +31,11 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
   const startedAt = Date.now();
 
   try {
-    let scheduleData;
-    if (ext === '.pdf') {
-      scheduleData = await extractScheduleDataFromPDF(req.file.path);
-    } else if (['.jpg', '.jpeg', '.png', '.bmp', '.webp'].includes(ext)) {
-      scheduleData = await extractScheduleDataFromImage(req.file.path);
-    } else {
+    if (ext !== '.pdf') {
       return res.status(400).json({ error: 'Unsupported file type' });
     }
+
+    const scheduleData = await extractScheduleDataFromPDF(req.file.path);
 
     const baseName = path.parse(req.file.originalname).name || 'Routine';
     const title = `${baseName} - Ramadan Routine`;
